@@ -216,14 +216,7 @@ If you use this work, please cite:
 
 This project is developed for academic purposes as part of a Master's thesis at Aalborg University.
 
-## 👥 Authors
-
-- **Amira Mostafa** - amosta24@student.aau.dk
-- **Yosr Drira** - ydrira25@student.aau.dk
-
-**Supervisor:** [Supervisor Name], Aalborg University
-
-## 🙏 Acknowledgments
+##  Acknowledgments
 
 - PyABSA team for the pretrained ATEPC-LCF model
 - McAuley Lab for the Amazon Reviews 2023 dataset
