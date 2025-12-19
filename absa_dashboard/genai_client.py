@@ -16,6 +16,13 @@ import pandas as pd
 from pathlib import Path
 from genai_cache import get_cached_answer, set_cached_answer
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv not installed, will use system environment variables
+
 # Configure module logger (stream to STDERR when running app)
 logger = logging.getLogger(__name__)
 if not logger.handlers:
@@ -50,12 +57,12 @@ except Exception:
 # Optional Google Gemini
 try:
     import google.generativeai as genai
-    GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', 'AIzaSyADCg85g6qUdsisi_U_KpWyBfQoTl_5G4A')
+    GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
     if GEMINI_API_KEY:
         genai.configure(api_key=GEMINI_API_KEY)
         logger.info(f"✅ Gemini configured successfully")
     else:
-        logger.warning("⚠️  No Gemini API key found")
+        logger.warning("⚠️  No Gemini API key found - set GEMINI_API_KEY environment variable")
         genai = None
 except Exception as e:
     logger.error(f"❌ Gemini import/configuration failed: {e}")
