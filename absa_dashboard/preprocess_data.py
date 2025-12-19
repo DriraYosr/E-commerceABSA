@@ -15,6 +15,20 @@ import numpy as np
 from pathlib import Path
 import json
 
+def print_aspect_reduction(df):
+    """
+    Print reduction in unique aspects after normalization.
+    Args:
+        df: DataFrame with 'aspect_term' and 'aspect_term_normalized' columns
+    """
+    original_count = df['aspect_term'].str.lower().nunique()
+    normalized_count = df['aspect_term_normalized'].nunique()
+    reduction = original_count - normalized_count
+    reduction_pct = (reduction / original_count * 100) if original_count > 0 else 0
+    print(f"Original unique aspects: {original_count}")
+    print(f"Normalized unique aspects: {normalized_count}")
+    print(f"Reduction: {reduction} aspects ({reduction_pct:.1f}%)")
+
 
 def normalize_aspect_terms(df):
     """

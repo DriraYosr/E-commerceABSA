@@ -1,0 +1,233 @@
+% LaTeX document describing inference.ipynb and ABSA dashboard features
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{amsmath}
+\usepackage{caption}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\lstset{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue},
+  stringstyle=\color{red},
+  commentstyle=\color{gray},
+  breaklines=true,
+  frame=single,
+  showstringspaces=false,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  captionpos=b
+}
+
+\title{Inference and Dashboard: Methods and Features}
+\author{ABSA Project}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Inference Notebook (\texttt{inference.ipynb})}
+\label{sec:inference}
+
+\subsection{Purpose}
+The notebook implements a resumable pipeline to run Aspect Term Extraction and Polarity Classification (ATEPC) over a large review dataset and to aggregate results for downstream analysis and visualization. The notebook uses the \texttt{pyabsa} library's ATEPC utilities and a pre-trained checkpoint for inference.
+
+\subsection{Model and Checkpoint}
+Inference uses the ATEPC AspectExtractor from the \texttt{pyabsa} package. The notebook loads a specific English checkpoint under the repository's \texttt{checkpoints} directory:
+\begin{verbatim}
+checkpoints/ATEPC_ENGLISH_CHECKPOINT/
+  fast_lcf_atepc_English_cdw_apcacc_82.36_apcf1_81.89_atef1_75.43
+\end{verbatim}
+
+The checkpoint name encodes key information about the model architecture, configuration variant, and performance metrics:
+\begin{itemize}
+  \item \textbf{fast\_lcf\_atepc}: The model architecture combines Local Context Focus (LCF) with Aspect Term Extraction and Polarity Classification (ATEPC). LCF is a mechanism that enhances aspect-term attention by focusing on local context windows around candidate terms, improving extraction accuracy while maintaining computational efficiency.
+  
+  \item \textbf{English}: The model is trained specifically on English-language review corpora, ensuring optimal performance for the target domain (English product reviews in the beauty category).
+  
+  \item \textbf{cdw}: A configuration variant identifier indicating specific hyperparameter settings (e.g., context-dependent windowing parameters, layer configurations, or attention head counts) used during training.
+  
+  \item \textbf{apcacc\_82.36}: Aspect Polarity Classification (APC) accuracy of 82.36\% on the validation set, indicating the model correctly predicts sentiment polarity (positive, negative, neutral) for identified aspect terms in over 82\% of cases.
+  
+  \item \textbf{apcf1\_81.89}: Aspect Polarity Classification F1-score of 81.89\%, reflecting balanced precision and recall for sentiment classification across all polarity classes.
+  
+  \item \textbf{atef1\_75.43}: Aspect Term Extraction (ATE) F1-score of 75.43\%, measuring the model's ability to correctly identify aspect term boundaries in review text with balanced precision (avoiding false positives) and recall (capturing true aspects).
+\end{itemize}
+
+This checkpoint is a strong choice for the beauty review domain because:
+\begin{enumerate}
+  \item \textbf{High APC performance (82.36\% accuracy)}: Reliable sentiment classification is critical for downstream analysis tasks such as aggregating aspect-level sentiment scores and detecting quality issues or customer satisfaction trends. The 82\%+ accuracy ensures that sentiment labels used in the dashboard are trustworthy.
+  
+  \item \textbf{Balanced ATE F1 (75.43\%)}: While aspect extraction is more challenging than classification (requiring precise boundary detection in free-form text), the 75\% F1-score is competitive for open-domain reviews. This ensures that the majority of meaningful product aspects (e.g., ``packaging,'' ``scent,'' ``texture'') are captured without excessive false positives.
+  
+  \item \textbf{English-specific training}: The checkpoint is optimized for English linguistic patterns, idioms, and review-writing conventions, which is essential for the Amazon Beauty dataset where informal language, slang, and product-specific terminology are common.
+  
+  \item \textbf{LCF architecture efficiency}: The Local Context Focus mechanism reduces computational overhead compared to full-sequence self-attention, enabling faster inference over large review corpora (tens of thousands of reviews) without sacrificing accuracy on local aspect-sentiment relationships.
+  
+  \item \textbf{Pre-trained and validated}: The checkpoint is part of PyABSA's official model zoo, meaning it has been validated on standard ABSA benchmarks (e.g., SemEval datasets) and is compatible with the library's inference and fine-tuning APIs, reducing integration risk.
+\end{enumerate}
+
+The extractor is instantiated with automatic device selection (\texttt{auto\\_device=True}) so it will use GPU if available, otherwise CPU.
+
+A compatibility patch is applied to the \texttt{DebertaV2TokenizerFast} class to provide missing token attributes and avoid runtime attribute errors when calling the tokenizer in the ATEPC pipeline. This is implemented by monkey-patching \texttt{__getattr__} to return safe defaults for tokens and their id properties.
+
+\subsection{Data Loading and Preprocessing}
+The notebook loads two files:
+\begin{itemize}
+  \item a product dataset in Parquet format (example name: \texttt{full-00000-of-00001.parquet})
+  \item a reviews file \texttt{All_Beauty.jsonl} (JSON-lines)
+\end{itemize}
+After loading, the notebook converts timestamps to datetime, filters by user-selected year and month, drops duplicates and non-verified purchases, and prepares a filtered dataframe used for inference.
+
+\subsection{Inference Loop and Resumable CSV Output}
+The notebook processes reviews in a loop, applying the \texttt{aspect\_extractor.predict(...)} call on each review text. To make the long-running job resumable and safe:
+\begin{itemize}
+  \item outputs are accumulated in memory and periodically flushed to a CSV file under \texttt{absa\_output/<Month><YY>/beauty\_absa\_results.csv};
+  \item if the CSV exists, processed review IDs are loaded and skipped to avoid re-processing;
+  \item the code handles exceptions per-review by recording a minimal result and continuing.
+\end{itemize}
+
+A simplified inference snippet:
+\begin{lstlisting}[language=Python]
+# initialize extractor
+aspect_extractor = ATEPC.AspectExtractor(checkpoint_path, auto_device=True)
+
+# loop through filtered reviews
+for idx, row in df_filtered.iterrows():
+    review_text = row['title'] + " " + row['text'] if ... else row['text']
+    try:
+        prediction = aspect_extractor.predict(review_text, save_result=False, print_result=False)
+        # extract aspects, sentiment, confidence
+        results.append({...})
+    except Exception as e:
+        results.append({ 'review_id': review_id, 'aspects_json': '[]', ... })
+
+# append to CSV for resumability
+results_df.to_csv(output_csv, mode='a', header=not os.path.exists(output_csv))
+\end{lstlisting}
+
+\subsection{Post-processing and Analysis}
+After processing, the notebook reads the CSV and aggregates aspect counts and sentiment distributions. It computes top-mentioned aspects and a simple sentiment score per aspect:
+\begin{equation}
+score = \frac{\text{Positive} - \text{Negative}}{\text{Total}}
+\end{equation}
+Results are printed and saved to the CSV for later use by the dashboard.
+
+\subsection{Implementation Details}
+\paragraph{Tokenizer Compatibility Patch.}
+A custom \texttt{\_\_getattr\_\_} method was injected into \texttt{DebertaV2TokenizerFast} to handle missing attributes dynamically. The patch provides default values for special tokens (\texttt{bos\_token}, \texttt{eos\_token}, \texttt{cls\_token}, etc.) and their corresponding IDs by calling \texttt{convert\_tokens\_to\_ids} when an attribute ending in \texttt{\_id} is requested. This prevents \texttt{AttributeError} exceptions during ATEPC inference.
+
+\paragraph{Resumable CSV Architecture.}
+The notebook implements a checkpoint-based resumption strategy: before processing, it checks if the output CSV exists and loads all \texttt{review\_id} values into a set. During the inference loop, reviews whose IDs are already in the set are skipped. New results are periodically appended to the CSV in batches (every 10 reviews) using \texttt{mode='a'} and conditional header writing. This ensures long-running jobs can be interrupted and resumed without data loss or redundant computation.
+
+\paragraph{Aspect JSON Encoding.}
+Each review's extracted aspects are serialized as a JSON array string stored in the \texttt{aspects\_json} column. Each aspect object contains \texttt{term}, \texttt{sentiment}, and \texttt{confidence} fields. This compact representation allows the dashboard to deserialize and aggregate aspects efficiently without requiring separate relational tables.
+
+\section{ABSA Dashboard: Features and Integration}
+\label{sec:dashboard}
+
+\subsection{Overview}
+The ABSA dashboard (implemented in \texttt{absa\_dashboard/dashboard.py}) is a Streamlit application that provides exploration, filtering and visualization for ABSA results. It consumes the CSV outputs produced by the inference notebook and provides interactive UI for analysts to explore aspect-level sentiment trends.
+
+\subsection{Primary Features and Utilities}
+The dashboard provides a comprehensive set of utilities for ABSA data exploration, model-driven inference inspection, and data export. Major capabilities include:
+\begin{itemize}
+  \item \textbf{Data ingestion and resumable processing:} Load review datasets from JSONL or Parquet formats, detect the appropriate text column, and resume long-running inference jobs by appending incremental results to CSV files under \texttt{absa\_output/}. The inference notebook's CSV output is directly consumable by the dashboard.
+
+  \item \textbf{Flexible filtering UI:} Interactive widgets to filter by product (ASIN), date range, year/month selector, rating, verified purchase flag, and free-text search on review titles/texts. Filters can be combined and applied live to update visualizations.
+
+  \item \textbf{Summary panels and aggregations:} Computation and display of per-product and global aggregations: overall rating distributions, top-mentioned aspects, aspect-level sentiment breakdowns, and counts/percentages with configurable thresholds.
+
+  \item \textbf{Visual analytics suite:} Multiple visualizations implemented with Plotly and Matplotlib:
+    \begin{itemize}
+      \item Histograms and density plots for ratings and review length.
+      \item Time-series plots for trend analysis (reviews per day/month, sentiment over time).
+      \item Polar charts and donut charts for aspect sentiment composition.
+      \item Wordclouds for quick keyword spotting.
+      \item Aspect heatmaps for comparing aspect frequency across product sets.
+    \end{itemize}
+
+  \item \textbf{Product Deep Dive mode:} For a selected ASIN the dashboard shows:
+    \begin{itemize}
+      \item The top-n reviews (by relevance or recency) with full text preview and metadata (review id, date, rating, verified flag).
+      \item Aspect extraction summaries (terms, sentiment, confidence) aggregated for the product.
+      \item Time-based breakdowns and an interactive table of reviews with sorting and pagination.
+    \end{itemize}
+
+  \item \textbf{Model checkpoint & inference integration:} The dashboard is designed to consume outputs produced by the ATEPC inference pipeline (see Section~\ref{sec:inference}). It expects per-review aspect outputs in CSV form and allows users to inspect model-level fields (predicted aspect terms, sentiment labels, confidence scores).
+
+  \item \textbf{Topic modeling and exploratory analysis:} Integration with topic modeling utilities (e.g., \texttt{topic\_modeling.py}) to compute topic clusters for a subset of reviews and visualize topic distributions across products or time windows.
+
+  \item \textbf{Alerting and monitoring utilities:} Scripts such as \texttt{alert\_system.py} enable simple alerting workflows (e.g., flag sudden spikes in negative sentiment) which can be used to generate reports or trigger downstream actions.
+
+  \item \textbf{Export and persistence:} Export filtered views and aggregated tables to CSV or Excel, supporting resumable exports and reproducible analysis flows. Configuration settings (e.g., checkpoint paths, embeddings dir) are centralized in \texttt{config.py}.
+
+  \item \textbf{Developer utilities:} Helper scripts in \texttt{utils.py} and \texttt{preprocess\_data.py} provide reusable ETL functions (cleaning, timestamp parsing, deduplication), which the UI reuses before visualizations.
+\end{itemize}
+
+\subsection{Files of Interest}
+The dashboard is composed of multiple modules; of particular relevance to users and developers are:
+\begin{itemize}
+  \item \texttt{absa\_dashboard/dashboard.py} --- Streamlit application entrypoint and all UI pages.
+  \item \texttt{absa\_dashboard/preprocess\_data.py} --- data cleaning and preprocessing utilities.
+  \item \texttt{absa\_dashboard/topic\_modeling.py} --- topic modeling helper functions and visualizations.
+  \item \texttt{absa\_dashboard/alert\_system.py} --- simple alerting and event detection utilities.
+  \item \texttt{absa\_dashboard/utils.py} --- misc helpers used across the dashboard and notebooks.
+  \item \texttt{absa\_dashboard/config.py} --- central configuration for paths and defaults (e.g., \texttt{EMBEDDINGS\_DIR}, checkpoint paths).
+  \item \texttt{inference.ipynb} (project root) --- the inference notebook that generates per-review ABSA outputs consumable by the dashboard.
+\end{itemize}
+
+\subsection{Technical Implementation}
+\paragraph{Data Pipeline Architecture.}
+The dashboard loads preprocessed CSV files (produced by the inference notebook) containing columns: \texttt{review\_id}, \texttt{rating}, \texttt{text}, \texttt{timestamp}, \texttt{user\_id}, \texttt{parent\_asin}, and \texttt{aspects\_json}. Upon load, the \texttt{aspects\_json} column is parsed using \texttt{json.loads} and expanded into aspect-level records for aggregation. Timestamps are converted to datetime objects to enable temporal filtering and grouping.
+
+\paragraph{Filter Chain Implementation.}
+Filters are implemented as a sequence of boolean masks applied to the dataframe. The UI collects user inputs (ASIN list, date range, rating thresholds, verified flag) via Streamlit widgets and constructs a combined mask using bitwise-AND operations. The filtered dataframe is cached using Streamlit's \texttt{@st.cache\_data} decorator to avoid redundant recomputation when filter parameters change.
+
+\paragraph{Aggregation Strategy.}
+Aspect-level aggregations are computed by grouping the expanded aspect records by \texttt{term} and \texttt{sentiment}, then counting occurrences. For each aspect term, the code computes:
+\begin{equation}
+\text{sentiment\_score} = \frac{\text{Positive} - \text{Negative}}{\text{Total}}
+\end{equation}
+Top-N aspects are selected by sorting on total mention count. Product-level aggregations similarly group by \texttt{parent\_asin} and compute per-product statistics.
+
+\paragraph{Visualization Layer.}
+Plotly and Matplotlib figures are generated dynamically based on filtered data. For example:
+\begin{itemize}
+  \item Histograms use \texttt{px.histogram} on the \texttt{rating} column with customizable bin sizes.
+  \item Time-series plots group by date (via \texttt{groupby} on \texttt{timestamp.dt.date}) and count reviews or compute mean sentiment per day.
+  \item Wordclouds are generated from concatenated review texts using \texttt{WordCloud} with stopword filtering and frequency weighting.
+  \item Aspect heatmaps pivot aspect counts (rows=aspects, columns=products or time bins) and render using \texttt{px.imshow}.
+\end{itemize}
+
+\paragraph{Topic Modeling Integration.}
+The \texttt{topic\_modeling.py} module uses Latent Dirichlet Allocation (LDA) or NMF from scikit-learn. Review texts are vectorized using \texttt{TfidfVectorizer}, the model is fit on the term-document matrix, and topic-term distributions are extracted. The dashboard displays per-document topic assignments and visualizes topic distributions using bar charts or stacked area plots.
+
+\paragraph{Export Functionality.}
+Filtered dataframes and aggregation results are exported via \texttt{pd.DataFrame.to\_csv} or \texttt{to\_excel}. The export functions accept a file path from the user (via Streamlit file input or hardcoded paths) and write the current view to disk. For large exports, the code supports chunked writes to avoid memory overflow.
+
+\subsection{Limitations and Maintenance Notes}
+\begin{itemize}
+  \item The aggregation strategy scales linearly with the number of reviews and aspects; for datasets exceeding 1M reviews, the in-memory groupby operations may become a bottleneck. Future work could include incremental aggregation or pre-computed summary tables.
+  \item Timestamp parsing assumes ISO-8601 or Unix epoch formats; malformed timestamps in the raw data are coerced to \texttt{NaT} and filtered out during preprocessing.
+  \item The tokenizer patch is version-specific and may break if \texttt{transformers} or \texttt{pyabsa} updates change the tokenizer internals. A long-term fix would involve contributing the patch upstream or using a maintained checkpoint with compatible tokenizers.
+  \item Topic modeling results depend heavily on hyperparameters (number of topics, vectorizer settings); the current implementation uses fixed defaults which may not generalize well across domains.
+\end{itemize}
+
+\section*{Appendix: Code Structure and Key Modules}
+\begin{itemize}
+  \item \textbf{Inference notebook:} \texttt{inference.ipynb} --- implements the ATEPC prediction loop, tokenizer patch, and resumable CSV writer.
+  \item \textbf{Dashboard entrypoint:} \texttt{absa\_dashboard/dashboard.py} --- Streamlit UI with filter widgets, visualization calls, and page routing.
+  \item \textbf{Preprocessing module:} \texttt{absa\_dashboard/preprocess\_data.py} --- ETL functions for cleaning review text, parsing timestamps, deduplicating rows, and detecting text columns.
+  \item \textbf{Topic modeling:} \texttt{absa\_dashboard/topic\_modeling.py} --- LDA/NMF wrappers and topic visualization utilities.
+  \item \textbf{Alerting:} \texttt{absa\_dashboard/alert\_system.py} --- threshold-based alerting logic for sentiment spikes or anomaly detection.
+  \item \textbf{Configuration:} \texttt{absa\_dashboard/config.py} --- centralized constants (paths, default model names, cache directories).
+  \item \textbf{Checkpoints:} \texttt{checkpoints/ATEPC\_ENGLISH\_CHECKPOINT/fast\_lcf\_atepc\_English\_cdw\_apcacc\_82.36\_...} --- pre-trained ATEPC model used for inference.
+\end{itemize}
+
+\end{document}

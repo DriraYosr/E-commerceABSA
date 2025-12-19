@@ -1,0 +1,185 @@
+% Standalone LaTeX fragment: GenAI section for ABSA report
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{amsmath}
+\usepackage{caption}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+% Listing style for Python code
+\lstset{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue},
+  stringstyle=\color{red},
+  commentstyle=\color{gray},
+  breaklines=true,
+  frame=single,
+  showstringspaces=false,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  captionpos=b
+}
+
+\title{GenAI Extension: Product Q\&A and Auto-Summary}
+\author{Generated for inclusion in ABSA project report}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{GenAI Extension: Product Q\&A and Auto-Summary}
+\label{sec:genai}
+
+\subsection{Overview}
+We added a GenAI extension to the ABSA dashboard that allows product-level question answering and short automatic summarization of review corpora. The feature is designed for interactive exploration: a user selects a product (ASIN), asks a natural-language question, and receives a concise, evidence-backed answer derived from the product reviews. Responses are produced either by a remote LLM (OpenAI) or by a locally-run Hugging Face model when an API key is not provided. Answers are cached locally to reduce latency and API cost.
+
+\subsection{Motivation}
+The GenAI facet augments ABSA outputs with actionable, human-readable explanations. Instead of manually scanning many reviews or inferring polarity metrics, users can ask targeted questions (e.g., ``How is the battery life for this model?'') and receive an answer grounded in real review excerpts. Key goals: improve analyst productivity, reduce time to insight, and keep API costs under control with caching and local fallbacks.
+
+\subsection{Architecture and Data Flow}
+The extension follows a Retrieval-Augmented Generation (RAG) pattern. High-level components:
+\begin{itemize}
+  \item Data loader: product reviews dataframe (detects the review text column automatically).
+  \item Embedding service: converts review texts (or queries) to dense vectors.
+  \item Index and metadata store: FAISS index + parquet metadata for fast retrieval.
+  \item Retriever: nearest-neighbor search to obtain top candidate snippets for a product.
+  \item Generator: OpenAI GPT (if \texttt{OPENAI\_API\_KEY} available) or local HF model (e.g., flan-t5-small).
+  \item Cache: local SQLite for (asin, question) $\rightarrow$ answer + snippets, with TTL.
+  \item UI: Streamlit panel (ask box, summary button, index / cache controls).
+\end{itemize}
+
+\begin{figure}[h!]
+  \centering
+  % Placeholder: add an architecture diagram if desired
+  \caption{RAG-style GenAI flow: reviews $\rightarrow$ embeddings $\rightarrow$ FAISS index $\rightarrow$ retrieved snippets $\rightarrow$ generator $\rightarrow$ UI.}
+  \label{fig:genai-arch}
+\end{figure}
+
+\subsection{Implementation Details}
+This subsection summarizes important implementation decisions and highlights the code-level logic. Key functions and their roles are implemented in \texttt{absa\_dashboard/genai\_client.py}.
+
+\subsubsection{Embeddings and Fallback}
+Primary embedding source: \texttt{sentence-transformers} (default model \texttt{all-MiniLM-L6-v2}). Embeddings are normalized to unit vectors so cosine similarity can be computed via inner product.
+
+To keep the app runnable when heavy packages are unavailable (or on constrained machines), a fallback uses TF-IDF plus optional TruncatedSVD to produce dense vectors. This fallback trades embedding quality for portability.
+
+Representative embedding code (abridged):
+\begin{lstlisting}[language=Python, caption={Abridged embedding function with fallback}]
+def get_sentence_transformer(...):
+    # returns a SentenceTransformer instance or None if package missing
+
+def embed_texts(texts, model=None):
+    if model is not None:
+        emb = model.encode(texts, convert_to_numpy=True).astype('float32')
+    else:
+        # TF-IDF + (optional) SVD fallback -> dense vectors
+        tfidf = TfidfVectorizer(max_features=1024, stop_words='english')
+        X = tfidf.fit_transform(texts)
+        emb = (SVD.transform(X) if SVD else X.toarray()).astype('float32')
+    # normalize
+    norms = np.linalg.norm(emb, axis=1, keepdims=True); norms[norms==0]=1
+    return (emb / norms).astype('float32')
+\end{lstlisting}
+
+\subsubsection{Indexing and Retrieval}
+A global FAISS index stores normalized embeddings for the whole dataset. Metadata (parent ASIN, review\_id, date, text preview) is persisted in a parquet file to map index positions back to reviews.
+
+Build and persist logic:
+\begin{itemize}
+  \item Compute embeddings for all review texts.
+  \item Build FAISS IndexFlatIP on normalized vectors.
+  \item Write index to disk (e.g., \texttt{embeddings/faiss.index}) and metadata to \texttt{embeddings/metadata.parquet}.
+  \item If FAISS is unavailable or file write fails, save embeddings as \texttt{embeddings/embeddings.npy} as a fallback.
+\end{itemize}
+
+Query-time: embed the user question, search a larger candidate set (\texttt{candidate\_k}), then filter results by the product ASIN and select \texttt{top\_k} final snippets for generation.
+
+\subsubsection{Generation and Prompting}
+Generator choice:
+\begin{itemize}
+  \item OpenAI ChatCompletion (if \texttt{OPENAI\_API\_KEY} is set). Prompts are constructed to require the model to cite supporting snippet indices (e.g., [0], [1]) and to avoid hallucinations.
+  \item Local Hugging Face pipeline (e.g., \texttt{google/flan-t5-small}) if OpenAI is not configured. The pipeline runs locally and is free to use (aside from machine resources). Model download occurs on first use.
+\end{itemize}
+
+Prompt structure (simplified):
+\begin{verbatim}
+SYSTEM: You are an assistant that answers product-review questions using only provided snippets...
+USER: QUESTION: <question>
+SNIPPETS:
+[0] review_id=...: <snippet 0>
+[1] review_id=...: <snippet 1>
+...
+\end{verbatim}
+
+A heuristic extracts citation indices from the generated text (regex searching for \texttt{\[\d+\]}) to present sources in the UI.
+
+\subsubsection{Caching and Performance}
+A local SQLite cache stores (asin, question) $\rightarrow$ (answer, snippets, timestamp). Cache entries respect a TTL (default 7 days) and the UI exposes:
+\begin{itemize}
+  \item Build Index button (precompute embeddings + index).
+  \item Clear cache button.
+  \item Force-refresh checkbox to bypass cache.
+  \item Cache stats: entries, hits/misses.
+\end{itemize}
+
+Caching reduces repeated API calls and speeds up repeated queries dramatically.
+
+\subsection{Privacy, Safety and Cost Controls}
+Privacy measures:
+\begin{itemize}
+  \item PII scrubbing: email addresses and phone numbers are redacted before any text is sent to external APIs.
+  \item Configurable API usage: generation only calls external APIs (OpenAI) if \texttt{OPENAI\_API\_KEY} is set. Otherwise a local model is used.
+\end{itemize}
+
+Cost controls:
+\begin{itemize}
+  \item Local generation avoids API costs at the expense of compute.
+  \item Cache reduces redundant external calls.
+\end{itemize}
+
+\subsection{Usage and Reproducibility}
+Important environment variables and commands:
+
+Environment variables:
+\begin{itemize}
+  \item \texttt{OPENAI\_API\_KEY} --- (optional) OpenAI key for cloud LLM.
+  \item \texttt{LOCAL\_GEN\_MODEL} --- (optional) model name for local HF pipeline (default: \texttt{google/flan-t5-small}).
+  \item \texttt{EMBEDDINGS\_DIR} --- directory to persist embeddings/index (default: \texttt{embeddings}).
+  \item \texttt{GENAI\_CACHE\_TTL} --- integer seconds for cache TTL.
+\end{itemize}
+
+Minimal run commands (PowerShell):
+\begin{verbatim}
+cd C:\path\to\project\absa_dashboard
+python -m pip install -r requirements.txt
+# optional: set local model
+$env:LOCAL_GEN_MODEL = 'google/flan-t5-small'
+streamlit run .\dashboard.py
+\end{verbatim}
+
+To build embeddings/index from the dashboard UI: press ``Build embeddings index'' in the GenAI panel (first run may take minutes and downloads model weights).
+
+\subsection{Limitations and Future Work}
+\begin{itemize}
+  \item Hallucination: generated answers (especially from local small models) may hallucinate; prompting and citation heuristics mitigate but do not eliminate this.
+  \item Model download time and disk usage: local models can be large; first-run downloads may be slow on limited networks.
+  \item FAISS binary platform issues: certain platforms may not have prebuilt wheels; a NumPy-only search fallback is implemented but slower.
+  \item Future improvements: hybrid BM25+vector retrieval, response-level QA evaluation, richer provenance display, multi-lingual support, and rate-limiting for API calls.
+\end{itemize}
+
+\subsection*{Appendix: Key code pointers}
+Key functions to cite in the report:
+\begin{itemize}
+  \item \texttt{embed\_texts(...)} --- unified embedding entrypoint (sentence-transformers or TF-IDF+SVD fallback).
+  \item \texttt{build\_and\_persist\_index(...)} --- compute and save FAISS index + metadata.
+  \item \texttt{load\_index\_and\_metadata(...)} --- load persisted index and metadata at runtime.
+  \item \texttt{qa\_for\_product(df, asin, question, ...)} --- orchestration: cache check, retrieval, generation, caching of results.
+  \item \texttt{answer\_with\_local\_model(...)} and \texttt{answer\_with\_openai(...)} --- generation paths.
+\end{itemize}
+
+\end{document}
